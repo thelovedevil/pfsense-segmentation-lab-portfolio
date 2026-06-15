@@ -1,0 +1,227 @@
+---
+# Phase 20 — Firewall rule tables (segmentation + fail-closed egress)
+# Source of truth: group_vars/all.yml  (vlans.*, nodes.*, ports.*, gateways.*, decisions.*)
+# Dry-run FIRST:  ansible-playbook playbooks/20_firewall.yml --check --diff
+#
+# ░ PORTFOLIO NOTE ░  Illustrative rule SHAPES for a generic three-tier topology —
+# not a live ruleset. The pattern: each interface is default-deny; segments cannot
+# move laterally; internet-bound segments egress only through the monitored VPN
+# gateway (so when it drops, traffic hits default-deny = fail closed).
+#
+# Design choices worth noting:
+#   • "block -> LAB_NET" is placed ABOVE "pass -> any via VPN_GW": the lab supernet is
+#     dropped first, so only non-lab (internet) traffic ever reaches the VPN gateway.
+#     This expresses "permit internet, deny lateral" using positive matches only.
+#   • First match wins; an implicit default-deny sits at the bottom of each interface.
+
+- name: Firewall rule tables (segmentation + kill-switch egress)
+  hosts: pfsense
+  gather_facts: false
+  collections: [pfsensible.core]
+
+  vars:
+    mgmt_net: "{{ vlans.mgmt.subnet }}"
+    op_net:   "{{ vlans.operator.subnet }}"
+    svc_net:  "{{ vlans.services.subnet }}"
+    bastion:  "{{ nodes.bastion }}"
+    store:    "{{ nodes.store }}"
+
+  tasks:
+    - name: Snapshot config.xml before firewall changes
+      ansible.builtin.fetch:
+        src: /conf/config.xml
+        dest: "snapshots/config_pre_fw_{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}.xml"
+        flat: true
+      tags: snapshot
+
+    # ── Aliases ──────────────────────────────────────────────────────────────────
+    - name: Alias — LAB_NET (the lab supernet; covers all VLANs)
+      pfsense_alias:
+        name: LAB_NET
+        type: network
+        address: "{{ aliases.LAB_NET }}"
+        descr: "All lab internal space"
+        state: present
+
+    - name: Alias — ADMIN_PORTS (GUI + SSH)
+      pfsense_alias:
+        name: ADMIN_PORTS
+        type: port
+        address: "{{ ports.pfsense_gui }} {{ ports.ssh }}"
+        descr: "firewall GUI + SSH"
+        state: present
+
+    # ── WAN — anti-spoof (block private + bogon) is ON by default on pfSense.
+    #    We deliberately do NOT reconfigure the WAN interface here: pfsense_interface
+    #    requires full iface params (incl. descr) and risks the DHCP/WAN config. Confirm
+    #    the two checkboxes in the GUI (Interfaces > WAN) if unsure.
+
+    # ── MGMT — admin plane; bastion is the sole source to the firewall ───────────
+    - name: "MGMT 1 — bastion is the SOLE source to the firewall GUI/SSH"
+      pfsense_rule:
+        name: "[ansible-managed] MGMT admin: bastion -> firewall"
+        interface: MGMT
+        action: pass
+        ipprotocol: inet
+        protocol: tcp
+        source: "{{ bastion }}"
+        destination: "(self)"
+        destination_port: ADMIN_PORTS
+        log: true
+        state: present
+
+    - name: "MGMT 2 — DNS to the firewall"
+      pfsense_rule:
+        name: "[ansible-managed] MGMT DNS -> firewall"
+        interface: MGMT
+        action: pass
+        ipprotocol: inet
+        protocol: tcp/udp
+        source: "{{ mgmt_net }}"
+        destination: "(self)"
+        destination_port: "{{ ports.dns }}"
+        state: present
+
+    - name: "MGMT 3 — no lateral movement to other VLANs"
+      pfsense_rule:
+        name: "[ansible-managed] MGMT block -> LAB_NET"
+        interface: MGMT
+        action: block
+        ipprotocol: inet
+        protocol: any
+        source: "{{ mgmt_net }}"
+        destination: LAB_NET
+        log: true
+        state: present
+
+    - name: "MGMT 4 — direct internet for updates (decisions.mgmt_internet)"
+      pfsense_rule:
+        name: "[ansible-managed] MGMT internet (direct WAN)"
+        interface: MGMT
+        action: pass
+        ipprotocol: inet
+        protocol: any
+        source: "{{ mgmt_net }}"
+        destination: any            # LAB already blocked above; this catches non-LAB only
+        state: present              # no gateway = system default (WAN), intentionally not via VPN
+      when: decisions.mgmt_internet | bool
+
+    # ── OPERATOR — workstations; egress via VPN only ─────────────────────────────
+    - name: "OPERATOR 1 — DNS to the firewall"
+      pfsense_rule:
+        name: "[ansible-managed] OPERATOR DNS -> firewall"
+        interface: OPERATOR
+        action: pass
+        ipprotocol: inet
+        protocol: tcp/udp
+        source: "{{ op_net }}"
+        destination: "(self)"
+        destination_port: "{{ ports.dns }}"
+        state: present
+
+    - name: "OPERATOR 2 — SSH jumphost to the bastion only (decisions.bastion_ssh)"
+      pfsense_rule:
+        name: "[ansible-managed] OPERATOR -> bastion:22"
+        interface: OPERATOR
+        action: pass
+        ipprotocol: inet
+        protocol: tcp
+        source: "{{ op_net }}"
+        destination: "{{ bastion }}"
+        destination_port: "{{ ports.ssh }}"
+        state: present
+      when: decisions.bastion_ssh | bool
+
+    - name: "OPERATOR 3 — SMB pull from the store jail"
+      pfsense_rule:
+        name: "[ansible-managed] OPERATOR -> store:445 (SMB)"
+        interface: OPERATOR
+        action: pass
+        ipprotocol: inet
+        protocol: tcp
+        source: "{{ op_net }}"
+        destination: "{{ store }}"
+        destination_port: "{{ ports.smb }}"
+        state: present
+
+    - name: "OPERATOR 4 — no firewall admin/services"
+      pfsense_rule:
+        name: "[ansible-managed] OPERATOR block -> firewall"
+        interface: OPERATOR
+        action: block
+        ipprotocol: inet
+        protocol: any
+        source: "{{ op_net }}"
+        destination: "(self)"
+        state: present
+
+    - name: "OPERATOR 5 — segmentation: no lateral to other VLANs"
+      pfsense_rule:
+        name: "[ansible-managed] OPERATOR block -> LAB_NET"
+        interface: OPERATOR
+        action: block
+        ipprotocol: inet
+        protocol: any
+        source: "{{ op_net }}"
+        destination: LAB_NET
+        state: present
+
+    - name: "OPERATOR 6 — internet egress via VPN (fail-closed)"
+      pfsense_rule:
+        name: "[ansible-managed] OPERATOR internet via VPN"
+        interface: OPERATOR
+        action: pass
+        ipprotocol: inet
+        protocol: any
+        source: "{{ op_net }}"
+        destination: any            # LAB blocked above; only non-LAB reaches the VPN gw
+        gateway: "{{ gateways.vpn_gw }}"
+        state: present
+
+    # ── SERVICES — store jail; inbound file-share only, no self-initiated egress ─
+    - name: "SERVICES 1 — DNS to the firewall"
+      pfsense_rule:
+        name: "[ansible-managed] SERVICES DNS -> firewall"
+        interface: SERVICES
+        action: pass
+        ipprotocol: inet
+        protocol: tcp/udp
+        source: "{{ svc_net }}"
+        destination: "(self)"
+        destination_port: "{{ ports.dns }}"
+        state: present
+
+    - name: "SERVICES 2 — no firewall admin/services"
+      pfsense_rule:
+        name: "[ansible-managed] SERVICES block -> firewall"
+        interface: SERVICES
+        action: block
+        ipprotocol: inet
+        protocol: any
+        source: "{{ svc_net }}"
+        destination: "(self)"
+        state: present
+
+    - name: "SERVICES 3 — store cannot INITIATE to any VLAN (SMB replies pass by state)"
+      pfsense_rule:
+        name: "[ansible-managed] SERVICES block -> LAB_NET"
+        interface: SERVICES
+        action: block
+        ipprotocol: inet
+        protocol: any
+        source: "{{ svc_net }}"
+        destination: LAB_NET
+        state: present
+
+    - name: "SERVICES 4 — store may fetch updates via VPN (decisions.store_internet)"
+      pfsense_rule:
+        name: "[ansible-managed] SERVICES internet via VPN"
+        interface: SERVICES
+        action: pass
+        ipprotocol: inet
+        protocol: any
+        source: "{{ svc_net }}"
+        destination: any
+        gateway: "{{ gateways.vpn_gw }}"
+        state: present
+      when: decisions.store_internet | bool

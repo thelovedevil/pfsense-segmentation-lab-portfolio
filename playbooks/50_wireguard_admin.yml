@@ -1,0 +1,40 @@
+---
+# Phase 50 — Break-glass admin WireGuard (second, out-of-band admin path)
+# Source of truth: group_vars/all.yml  (admin_wireguard_port, admin_wireguard_net)  + vault
+#
+# This admin tunnel terminates ON the firewall and is SEPARATE from the egress VPN in
+# Phase 15. It exists to directly mitigate the bastion-only lockout risk: if the bastion
+# chain is down, you can still reach the firewall over WireGuard. AllowedIPs are narrowed
+# to the MGMT plane by design.
+
+- name: Break-glass admin WireGuard
+  hosts: pfsense
+  gather_facts: false
+  collections: [pfsensible.core]
+
+  tasks:
+    - name: Snapshot config.xml
+      ansible.builtin.fetch:
+        src: /conf/config.xml
+        dest: "snapshots/config_pre_wgadmin_{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}.xml"
+        flat: true
+      tags: snapshot
+
+    - name: "[VERIFY] admin WireGuard tunnel/peer (GUI or rewrite_config)"
+      ansible.builtin.debug:
+        msg: >
+          Create the admin WG tunnel on UDP/{{ admin_wireguard_port }} with the overlay
+          {{ admin_wireguard_net }} and your control node's public key (from the vault).
+          pfsensible has no WireGuard module, so this object is GUI-owned.
+
+    - name: Allow the admin WG overlay to reach the firewall GUI/SSH
+      pfsense_rule:
+        name: "[ansible-managed] admin WG -> firewall (break-glass)"
+        interface: WGADMIN
+        action: pass
+        ipprotocol: inet
+        protocol: tcp
+        source: "{{ admin_wireguard_net }}"
+        destination: "(self)"
+        destination_port: ADMIN_PORTS
+        state: present

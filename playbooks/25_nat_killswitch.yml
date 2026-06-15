@@ -1,0 +1,100 @@
+---
+# Phase 25 — Outbound NAT + fail-closed VPN kill-switch
+# Source of truth: group_vars/all.yml  (vlans.*, gateways.*, admin.legacy_lan_subnet)
+#
+# The kill-switch is two cooperating parts:
+#   1. NAT scoping — operator/services are translated ONLY onto the VPN interface;
+#      mgmt/self are translated onto WAN. There is deliberately NO WAN outbound-NAT
+#      for operator/services, so even a stray packet to WAN has no translation path.
+#   2. Gateway-down behaviour — when the monitored VPN gateway is marked down, the
+#      VPN pass rules stop matching, so operator/services traffic falls through to the
+#      implicit default-deny. There is intentionally no WAN fallback beneath them.
+#
+# Net effect: VPN up → egress via VPN; VPN down → egress blocked (fail closed).
+# INVARIANT (asserted in Phase 99): no operator/services pass routes "any" via WAN.
+
+- name: Outbound NAT + VPN kill-switch
+  hosts: pfsense
+  gather_facts: false
+  collections: [pfsensible.core]
+
+  vars:
+    op_net:   "{{ vlans.operator.subnet }}"
+    svc_net:  "{{ vlans.services.subnet }}"
+    mgmt_net: "{{ vlans.mgmt.subnet }}"
+
+  tasks:
+    - name: Snapshot config.xml
+      ansible.builtin.fetch:
+        src: /conf/config.xml
+        dest: "snapshots/config_pre_nat_{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}.xml"
+        flat: true
+      tags: snapshot
+
+    # Switch Outbound NAT to MANUAL in the GUI first (Firewall > NAT > Outbound). pfSense
+    # COPIES your existing auto rules on the switch, so your current LAN keeps internet.
+    # Then delete the operator/services WAN copies so only the VPN mappings below remain —
+    # that ABSENCE is the kill-switch. These mappings are additive and inert until the mode
+    # is Manual/Hybrid, so applying this playbook on its own cannot break connectivity.
+    - name: Outbound NAT mode reminder (set MANUAL in the GUI, let it copy existing rules)
+      ansible.builtin.debug:
+        msg: >
+          Set Outbound NAT to MANUAL in the GUI (it copies existing rules). Ensure
+          operator/services have NO WAN NAT — only the VPN mappings below.
+
+    - name: "NAT 0 — keep CURRENT LAN on WAN during migration (admin.legacy_lan_subnet)"
+      pfsense_nat_outbound:
+        interface: wan
+        source: "{{ admin.legacy_lan_subnet }}"
+        destination: any
+        descr: "[ansible-managed] legacy LAN egress via WAN"
+        state: present
+      when: admin.legacy_lan_subnet | default('') | length > 0
+
+    - name: "NAT 1/2 — operator + services egress translated onto the VPN interface"
+      pfsense_nat_outbound:
+        interface: VPNEGRESS
+        source: "{{ item }}"
+        destination: any
+        descr: "[ansible-managed] {{ item }} egress via VPN"
+        state: present
+      loop:
+        - "{{ op_net }}"
+        - "{{ svc_net }}"
+
+    - name: "NAT 3 — mgmt egress translated onto WAN (direct updates, no VPN)"
+      pfsense_nat_outbound:
+        interface: wan
+        source: "{{ mgmt_net }}"
+        destination: any
+        descr: "[ansible-managed] MGMT egress via WAN"
+        state: present
+
+    - name: "NAT 4 — firewall self/localhost translated onto WAN"
+      pfsense_nat_outbound:
+        interface: wan
+        source: "127.0.0.0/8"
+        destination: any
+        descr: "[ansible-managed] self egress via WAN"
+        state: present
+
+    # Enable the firewall's "gateway down → fail closed" behaviour. The exact setting
+    # names and config keys vary by pfSense release, so confirm them in the GUI under
+    # System > Advanced > Miscellaneous (gateway monitoring / state handling) for your
+    # version, then ALWAYS test by dropping the tunnel and confirming egress stops.
+    - name: "[VERIFY] enable fail-closed gateway-down behaviour (confirm per release)"
+      ansible.builtin.debug:
+        msg: >
+          Enable "skip rules when gateway is down" + "kill states on gateway failure" in the
+          GUI (System > Advanced > Misc). On recent pfSense the config keys are
+          skip_rules_gw_down + gw_down_kill_states. ALSO pin the default gateway explicitly to
+          WAN (not Automatic): if the VPN gateway is up while WAN's monitor falsely reads down,
+          Automatic moves the default route onto the VPN. Then TEST: drop the tunnel and
+          confirm operator/services egress stops with no WAN fallback.
+
+    - name: Default gateway must be WAN, not the VPN (policy-routing kill-switch topology)
+      pfsense_default_gateway:
+        gateway: "{{ gateways.wan_gw }}"   # module takes only gateway + ipprotocol (no state)
+        ipprotocol: inet
+      ignore_errors: true   # WAN gateway auto-name varies (e.g. WAN_DHCP); verify on target
+      tags: [verify]

@@ -1,0 +1,109 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# Segmentation Lab — canonical parameters (SINGLE SOURCE OF TRUTH)
+#
+# ░ PORTFOLIO NOTE ░  All values below are ILLUSTRATIVE EXAMPLES for a generic
+# three-VLAN home/lab topology. They do not reflect any live deployment. Copy this
+# file to group_vars/all.yml and replace with your own interface names, subnets,
+# and host addresses. Secrets live only in the gitignored vault (host_vars/*).
+#
+# Target: pfSense CE — applied via Ansible + pfsensible.core over SSH.
+# CE has no built-in REST API; pfsensible edits config.xml and reloads.
+# ═════════════════════════════════════════════════════════════════════════════
+
+hardware:
+  pfsense_wan_if:   igb0        # uplink to ISP/modem
+  pfsense_lan_if:   igb1        # 802.1Q trunk to the managed switch
+  freebsd_trunk_if: igb0        # FreeBSD HOST nic — DIFFERENT machine; resolve independently
+  vpn_egress_if:    tun_wg0     # commercial WireGuard VPN egress tunnel (assigned as VPNEGRESS)
+
+vlans:
+  mgmt:     { id: 10, subnet: "10.0.10.0/24", gw: "10.0.10.1", prefix: 24 }
+  operator: { id: 20, subnet: "10.0.20.0/24", gw: "10.0.20.1", prefix: 24 }
+  services: { id: 30, subnet: "10.0.30.0/24", gw: "10.0.30.1", prefix: 24 }
+
+nodes:
+  pfsense_mgmt: "10.0.10.1"
+  switch_mgmt:  "10.0.10.2"     # managed switch web UI, on the MGMT VLAN
+  freebsd_host: "10.0.10.5"     # host mgmt leg (bridge10)
+  bastion:      "10.0.10.10"    # bastion jail (VNET) — SOLE firewall admin source
+  store:        "10.0.30.10"    # file-store jail (VNET)
+  compute_node: "10.0.20.20"    # operator / compute
+  operator_ws:  "10.0.20.21"    # operator workstation
+
+ports:
+  pfsense_gui: 443
+  ssh:         22
+  smb:         445
+  dns:         53
+
+gateways:
+  wan_gw: WAN_GW                # default ISP route
+  vpn_gw: VPN_GW                # WireGuard tunnel gateway (policy-routed egress)
+
+aliases:
+  LAB_NET: "10.0.0.0/16"        # the lab supernet (covers all VLANs); "!LAB_NET" = not-my-lab
+  THIS_FW: "(self)"             # pfSense 'This Firewall (self)'
+
+# ── Commercial WireGuard VPN egress. Secrets pulled from the gitignored vault. ──
+vpn:
+  listen_port:       51820
+  private_key:       "{{ vault_vpn_privkey   | default('') }}"
+  peer_pubkey:       "{{ vault_vpn_pubkey    | default('') }}"
+  endpoint:          "{{ vault_vpn_endpoint  | default('') }}"   # host:port
+  interface_address: "{{ vault_vpn_address   | default('') }}"   # e.g. 10.2.0.2/32
+  gateway_ip:        "10.2.0.1"  # far-side tunnel IP (provider end); used with nonlocalgateway
+  monitor_ip:        "9.9.9.9"   # kill-switch down-detection (1.1.1.1 rate-limits ICMP from VPN exits)
+  full_tunnel:       true        # AllowedIPs 0.0.0.0/0
+
+# ── Admin plane & lockout safety ──
+admin:
+  sole_source:          "10.0.10.10"   # = nodes.bastion; only this reaches the firewall 443/22
+  lan_interface:        mgmt           # which assigned iface the firewall treats as LAN
+  disable_anti_lockout: true           # required to honour sole_source; console = backstop
+  scaffold_admin_ip:    ""             # TEMP admin IP allowed during bootstrap; removed LAST
+  legacy_lan_subnet:    ""             # your CURRENT flat LAN (e.g. 192.168.0.0/24) so the NAT
+                                       # change keeps existing internet during the migration
+
+# DHCP pools — OPERATOR gets DHCP; MGMT/SERVICES are static.
+dhcp:
+  operator: { from: "10.0.20.100", to: "10.0.20.200" }
+
+# ── FreeBSD host: VLAN legs, bridges, VNET jails ──
+freebsd:
+  trunk_if: igb0
+  defaultrouter: "10.0.10.1"
+  bridges:
+    bridge10: { vlan: 10, host_ip: "10.0.10.5/24" }    # host mgmt leg
+    bridge30: { vlan: 30, host_ip: "" }                # carries the store jail only; host has no leg
+  jails:
+    bastion: { vlan: 10, ip: "10.0.10.10/24", gw: "10.0.10.1", role: bastion }
+    store:   { vlan: 30, ip: "10.0.30.10/24", gw: "10.0.30.1", role: filestore }
+
+# ── Samba on the store jail ──
+samba:
+  workgroup:    LAB
+  interface:    "10.0.30.10"
+  hosts_allow:  "10.0.20.0/24"
+  min_protocol: SMB3_11
+  encrypt:      required
+
+# ── DECISIONS — toggles that change which rules are emitted ──
+decisions:
+  bastion_ssh:        true       # operator may SSH the bastion jail (key-only)
+  operator_isolation: false      # true → split operator hosts onto separate L2/VLANs
+  store_internet:     true       # store jail may fetch updates via the VPN egress
+  mgmt_internet:      true       # MGMT may reach the internet directly for updates
+  dhcp:               operator   # which VLANs get DHCP vs static
+  file_protocol:      smb        # smb(445) now; add nfs(2049) later if needed
+  anti_lockout:       disabled   # mirrors admin.disable_anti_lockout
+
+# ── Optional generic-hardening knobs (phases 30/40/50) ──
+admin_wireguard_port: 51821          # break-glass admin VPN INTO the firewall (≠ egress 51820)
+admin_wireguard_net:  "10.99.0.0/24" # WG overlay for out-of-band admin
+
+suricata_ruleset: etopen             # etopen (free) | etpro (subscription)
+suricata_iface:   "{{ hardware.pfsense_wan_if }}"
+
+log_forward_host: "10.0.10.50"       # log collector on the MGMT VLAN
+log_forward_port: 5144
+log_retention_days: 14

@@ -1,0 +1,57 @@
+---
+# Phase 40 — Forward logs off-box (optional)
+# Source of truth: group_vars/all.yml  (suricata_iface, log_forward_host, log_forward_port)
+#
+# The firewall's /var is RAM-backed and small; stream Suricata EVE JSON to a collector on
+# the MGMT VLAN (e.g. a Vector/syslog listener) so retention and analysis live off-box.
+# pfsensible has no syslog-ng module, so this is done with raw + a config fragment.
+
+- name: Forward EVE JSON to the log collector
+  hosts: pfsense
+  gather_facts: false
+  collections: [pfsensible.core]
+
+  tasks:
+    - name: Snapshot config.xml
+      ansible.builtin.fetch:
+        src: /conf/config.xml
+        dest: "snapshots/config_pre_logfwd_{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}.xml"
+        flat: true
+      tags: snapshot
+
+    - name: Install syslog-ng package
+      ansible.builtin.raw: pkg install -y pfSense-pkg-syslog-ng
+      changed_when: true
+
+    - name: Write the EVE-forward config fragment
+      ansible.builtin.raw: |
+        cat > /usr/local/etc/syslog-ng/syslog-ng.conf.d/eve_forward.conf << 'SNGEOF'
+        # ansible-managed — forward Suricata EVE JSON to the MGMT collector
+        source s_eve {
+            file("/var/log/suricata/suricata_{{ suricata_iface }}/eve.json"
+                 follow_freq(1) program-override("suricata-eve"));
+        };
+        destination d_collector {
+            syslog("{{ log_forward_host }}" port({{ log_forward_port }})
+                   transport("tcp") template("${MESSAGE}\n"));
+        };
+        log { source(s_eve); destination(d_collector); };
+        SNGEOF
+      changed_when: true
+
+    - name: Restart syslog
+      ansible.builtin.raw: service syslogd onerestart
+      changed_when: true
+
+    - name: Reminder
+      ansible.builtin.debug:
+        msg: >
+          Confirm the collector at {{ log_forward_host }}:{{ log_forward_port }} is receiving
+          events (e.g. a Vector "socket" tcp source writing to dated files).
+
+    - name: "[rollback] remove the EVE-forward config"
+      ansible.builtin.raw: >
+        rm -f /usr/local/etc/syslog-ng/syslog-ng.conf.d/eve_forward.conf &&
+        service syslogd onerestart
+      changed_when: true
+      tags: [never, rollback]

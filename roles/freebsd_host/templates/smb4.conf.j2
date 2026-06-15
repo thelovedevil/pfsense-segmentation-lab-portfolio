@@ -1,0 +1,20 @@
+; {{ ansible_managed }} — store jail file share
+[global]
+   workgroup = {{ samba.workgroup }}
+   server string = store jail file share
+   server min protocol = {{ samba.min_protocol }}
+   smb encrypt = {{ samba.encrypt }}          ; SMB3 sealing — in-transit encryption mandatory
+   bind interfaces only = yes
+   interfaces = {{ samba.interface }}
+   hosts allow = {{ samba.hosts_allow }} 127.
+   hosts deny = ALL
+   security = user
+   log file = /var/log/samba4/%m.log
+   max log size = 1000
+
+[media]
+   path = /storage/media
+   valid users = @smbusers
+   read only = no
+   create mask = 0660
+   directory mask = 0770

@@ -1,0 +1,16 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# EXAMPLE vault — copy to host_vars/pfsense.vault.yml (which is GITIGNORED), fill in
+# real values, then optionally:  ansible-vault encrypt host_vars/pfsense.vault.yml
+#
+# The real pfsense.vault.yml is excluded by .gitignore (*.vault.yml). A secret must
+# NEVER enter git history — keep the real key out of every commit.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Commercial WireGuard VPN egress (from your provider's WireGuard config)
+vault_vpn_privkey:  "REPLACE_WITH_interface_PrivateKey"
+vault_vpn_pubkey:   "REPLACE_WITH_peer_PublicKey"
+vault_vpn_endpoint: "REPLACE_WITH_server_host:51820"
+vault_vpn_address:  "10.2.0.2/32"        # provider-assigned interface Address
+
+# Break-glass admin WireGuard (public key of your control node)
+vault_admin_wg_pubkey: "REPLACE_WITH_control_node_WireGuard_PublicKey"

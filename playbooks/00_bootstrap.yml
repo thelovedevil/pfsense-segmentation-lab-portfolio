@@ -1,0 +1,23 @@
+---
+# Phase 00 — Bootstrap: verify connectivity, snapshot a baseline config.xml
+# Usage:  ansible-playbook playbooks/00_bootstrap.yml
+
+- name: Bootstrap connectivity + baseline snapshot
+  hosts: pfsense
+  gather_facts: false
+
+  tasks:
+    - name: Confirm SSH reachability
+      ansible.builtin.raw: /bin/echo connected
+      changed_when: false
+
+    - name: Snapshot baseline config.xml to the control node
+      ansible.builtin.fetch:
+        src: /conf/config.xml
+        dest: "snapshots/config_baseline_{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}.xml"
+        flat: true
+      tags: snapshot
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "Baseline captured. Review snapshots/ before applying any phase."

@@ -1,0 +1,48 @@
+---
+# Phase 10 — VLAN interfaces (additive; existing interfaces untouched)
+# Source of truth: group_vars/all.yml  (hardware.*, vlans.*)
+# Dry-run FIRST:  ansible-playbook playbooks/10_vlans.yml --check --diff
+
+- name: Create MGMT / OPERATOR / SERVICES VLANs on the LAN trunk
+  hosts: pfsense
+  gather_facts: false
+  collections: [pfsensible.core]
+
+  tasks:
+    - name: Snapshot config.xml
+      ansible.builtin.fetch:
+        src: /conf/config.xml
+        dest: "snapshots/config_pre_vlans_{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}.xml"
+        flat: true
+      tags: snapshot
+
+    - name: Define 802.1Q VLAN tags on the trunk NIC
+      pfsense_vlan:
+        interface: "{{ hardware.pfsense_lan_if }}"
+        vlan_id: "{{ item.id }}"
+        descr: "{{ item.name | upper }}"
+        state: present
+      loop:
+        - { id: "{{ vlans.mgmt.id }}",     name: mgmt }
+        - { id: "{{ vlans.operator.id }}", name: operator }
+        - { id: "{{ vlans.services.id }}", name: services }
+
+    - name: Assign + address each VLAN interface
+      pfsense_interface:
+        interface: "{{ hardware.pfsense_lan_if }}.{{ item.id }}"
+        descr: "{{ item.name }}"
+        enable: true
+        ipv4_type: static
+        ipv4_address: "{{ item.gw }}"
+        ipv4_prefixlen: "{{ item.prefix }}"
+        state: present
+      loop:
+        - { id: "{{ vlans.mgmt.id }}",     name: MGMT,     gw: "{{ vlans.mgmt.gw }}",     prefix: "{{ vlans.mgmt.prefix }}" }
+        - { id: "{{ vlans.operator.id }}", name: OPERATOR, gw: "{{ vlans.operator.gw }}", prefix: "{{ vlans.operator.prefix }}" }
+        - { id: "{{ vlans.services.id }}", name: SERVICES, gw: "{{ vlans.services.gw }}", prefix: "{{ vlans.services.prefix }}" }
+
+    # Per-phase rollback restores the newest pre-phase snapshot (see docs/runbook.md).
+    - name: "[rollback] restore newest pre-phase backup"
+      ansible.builtin.raw: cp "$(ls -t /cf/conf/backup/config-*.xml | head -1)" /conf/config.xml && /etc/rc.reload_all
+      changed_when: true
+      tags: [never, rollback]

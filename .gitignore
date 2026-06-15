@@ -1,0 +1,15 @@
+# Secrets — never commit
+*.vault.yml
+!*.vault.example.yml
+.vault_pass
+*.key
+
+# Real (filled-in) config — keep only the *.example.yml templates public
+group_vars/all.yml
+
+# Per-phase config snapshots fetched from the firewall
+snapshots/*.xml
+
+# Editor / OS noise
+*.retry
+.DS_Store

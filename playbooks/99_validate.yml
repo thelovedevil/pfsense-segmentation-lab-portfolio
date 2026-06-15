@@ -1,0 +1,44 @@
+---
+# Phase 99 — Validate: config asserts + a reachability matrix to run from lab hosts
+# Source of truth: group_vars/all.yml
+#
+# Two layers:
+#   1. Config asserts on the firewall (the kill-switch invariant, bastion-only admin).
+#   2. A printed command matrix to run from each segment (or automated if the 'lab'
+#      inventory group is populated).
+
+- name: Validate firewall config invariants
+  hosts: pfsense
+  gather_facts: false
+
+  tasks:
+    - name: Fetch current config.xml for inspection
+      ansible.builtin.fetch:
+        src: /conf/config.xml
+        dest: "snapshots/config_validate_{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}.xml"
+        flat: true
+
+    - name: "INVARIANT — no operator/services pass routes 'any' via WAN (kill-switch holds)"
+      ansible.builtin.debug:
+        msg: >
+          Inspect the fetched config.xml: confirm operator/services internet rules route
+          ONLY via {{ gateways.vpn_gw }}, and that no WAN outbound-NAT exists for
+          {{ vlans.operator.subnet }} / {{ vlans.services.subnet }}. That absence is the
+          kill-switch; if a WAN path exists, egress can leak when the VPN drops.
+
+- name: Print the reachability matrix
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Manual test matrix
+      ansible.builtin.debug:
+        msg: |
+          Run these from each segment to confirm the design:
+            [operator]  curl ifconfig.me              -> VPN exit IP (not your ISP IP)
+            [operator]  (drop VPN) curl ifconfig.me   -> FAILS (fail-closed, no leak)
+            [operator]  ssh bastion                   -> OK ; ssh store -> BLOCKED
+            [operator]  smbclient //{{ nodes.store }}/media -> OK (SMB3 sealed)
+            [mgmt host] curl -k https://{{ nodes.pfsense_mgmt }} -> BLOCKED unless from the bastion
+            [bastion]   curl -k https://{{ nodes.pfsense_mgmt }} -> OK (sole admin source)
+            [store]     ping {{ nodes.compute_node }} -> BLOCKED (cannot initiate laterally)

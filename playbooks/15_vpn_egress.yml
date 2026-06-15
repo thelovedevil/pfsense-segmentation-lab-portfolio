@@ -1,0 +1,49 @@
+---
+# Phase 15 — Commercial WireGuard VPN egress tunnel + monitored gateway
+# Source of truth: group_vars/all.yml  (vpn.*, gateways.vpn_gw)  +  vault (keys)
+#
+# pfSense CE fully supports WireGuard (VPN > WireGuard; config in config.xml). The
+# only gap is the Ansible collection: pfsensible.core has no pfsense_wireguard_*
+# module (and pfsense_rewrite_config only REFORMATS config.xml — it cannot inject
+# sections), so the tunnel/peer are created once in the GUI; this phase then assigns
+# the interface and adds the monitored gateway. Provider keys come from the gitignored vault.
+
+- name: VPN egress interface + monitored gateway
+  hosts: pfsense
+  gather_facts: false
+  collections: [pfsensible.core]
+
+  tasks:
+    - name: Snapshot config.xml
+      ansible.builtin.fetch:
+        src: /conf/config.xml
+        dest: "snapshots/config_pre_vpn_{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}.xml"
+        flat: true
+      tags: snapshot
+
+    - name: "[VERIFY] WireGuard tunnel/peer exist (created in the GUI)"
+      ansible.builtin.debug:
+        msg: >
+          Confirm the WireGuard tunnel ({{ hardware.vpn_egress_if }}) and peer are present
+          under VPN > WireGuard, populated from the vault values. pfsensible has no
+          WireGuard module, so this one object is GUI-owned; Ansible owns everything else.
+
+    - name: Assign the VPN tunnel as an interface (VPNEGRESS)
+      pfsense_interface:
+        interface: "{{ hardware.vpn_egress_if }}"
+        descr: VPNEGRESS
+        enable: true
+        ipv4_type: static                                        # gateway needs an IPv4 on the iface
+        ipv4_address: "{{ vpn.interface_address.split('/')[0] }}"  # the tunnel address (e.g. 10.2.0.2)
+        ipv4_prefixlen: 32
+        mtu: 1420                                                # WireGuard overhead; avoids drops
+        state: present
+
+    - name: Monitored gateway on the VPN tunnel (drives the kill-switch)
+      pfsense_gateway:
+        name: "{{ gateways.vpn_gw }}"
+        interface: VPNEGRESS
+        gateway: "{{ vpn.gateway_ip }}"     # far-side tunnel IP (e.g. 10.2.0.1); not "dynamic"
+        nonlocalgateway: true               # it sits outside the /32 interface subnet
+        monitor: "{{ vpn.monitor_ip }}"     # gateway marked down when this stops responding
+        state: present

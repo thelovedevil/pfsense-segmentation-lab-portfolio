@@ -1,0 +1,36 @@
+---
+# ═════════════════════════════════════════════════════════════════════════════
+# Segmentation Lab — orchestrator
+#
+# Runs the BUILD phases in lockout-safe order. It deliberately STOPS before the
+# point of no return: it does NOT run 60_lockdown or 99_validate. After this:
+#   1. ansible-playbook playbooks/99_validate.yml        # verify everything
+#   2. confirm bastion -> firewall admin + break-glass WG work
+#   3. ansible-playbook playbooks/60_lockdown.yml        # remove scaffold, bastion-only
+#
+# ALWAYS dry-run first:  ansible-playbook site.yml --check --diff
+# KEEP A SERIAL CONSOLE available throughout (the only segment-independent backstop).
+# ═════════════════════════════════════════════════════════════════════════════
+
+- import_playbook: playbooks/00_bootstrap.yml        # snapshot baseline
+- import_playbook: playbooks/10_vlans.yml            # VLAN interfaces (additive)
+- import_playbook: playbooks/12_dhcp.yml             # DHCP for operator devices
+- import_playbook: playbooks/15_vpn_egress.yml       # commercial WireGuard VPN egress tunnel + gateway
+- import_playbook: playbooks/18_scaffold_admin.yml   # ANTI-LOCKOUT scaffold (removed in 60)
+- import_playbook: playbooks/20_firewall.yml         # segmentation rule tables
+- import_playbook: playbooks/25_nat_killswitch.yml   # outbound NAT + fail-closed kill-switch
+- import_playbook: playbooks/30_suricata_ids.yml     # optional IDS
+- import_playbook: playbooks/40_log_forward.yml      # optional log forwarding
+- import_playbook: playbooks/50_wireguard_admin.yml  # break-glass admin WG (2nd admin path)
+- import_playbook: playbooks/70_freebsd_host.yml     # FreeBSD host + VNET jails + Samba
+
+- name: Next steps
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: |
+          Build phases applied. NOT yet locked down. Now:
+            1. ansible-playbook playbooks/99_validate.yml
+            2. Confirm: bastion -> firewall admin works, AND the WG break-glass tunnel works
+            3. ansible-playbook playbooks/60_lockdown.yml   (auto-reverts in 5 min unless confirmed)

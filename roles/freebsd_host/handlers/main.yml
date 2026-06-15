@@ -1,0 +1,10 @@
+---
+- name: reload network
+  ansible.builtin.raw: /etc/rc.d/netif restart && /etc/rc.d/routing restart
+  # NOTE: restarting netif can briefly drop host connectivity — keep console access.
+
+- name: restart sshd
+  ansible.builtin.raw: service sshd restart
+
+- name: reload sysctl
+  ansible.builtin.raw: service sysctl reload

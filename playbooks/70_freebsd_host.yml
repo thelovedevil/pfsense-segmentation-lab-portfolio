@@ -1,0 +1,10 @@
+---
+# Phase 70 — FreeBSD host: VLAN legs, VNET jails, Samba
+# Targets the inventory group 'freebsd' (a DIFFERENT machine from the firewall).
+# Dry-run FIRST:  ansible-playbook playbooks/70_freebsd_host.yml --check --diff
+
+- name: FreeBSD host — VLAN legs + VNET jails + Samba
+  hosts: freebsd
+  gather_facts: true
+  roles:
+    - freebsd_host

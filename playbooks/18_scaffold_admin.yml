@@ -1,0 +1,55 @@
+---
+# Phase 18 — Scaffold admin access  (ANTI-LOCKOUT — removed by Phase 60)
+# Source of truth: group_vars/all.yml  (admin.scaffold_admin_ip, ports.*)
+#
+# WHY: Phase 20 makes the bastion the SOLE source allowed to reach the firewall
+# 443/22, and Phase 60 DISABLES the anti-lockout rule. If the bastion / FreeBSD host
+# / switch aren't up yet, applying Phase 20 would cut every network admin path. This
+# temporary rule keeps YOUR workstation able to reach the GUI/SSH while you build and
+# verify the bastion chain. Phase 60 deletes it once the bastion is proven.
+#
+# Set admin.scaffold_admin_ip to your current admin workstation IP before running.
+# KEEP A SERIAL CONSOLE AVAILABLE regardless — it is the only segment-independent backstop.
+
+- name: Scaffold temporary admin access (removed in Phase 60)
+  hosts: pfsense
+  gather_facts: false
+  collections: [pfsensible.core]
+
+  tasks:
+    - name: Require a scaffold admin IP
+      ansible.builtin.assert:
+        that: admin.scaffold_admin_ip | default('') | length > 0
+        fail_msg: >
+          Set admin.scaffold_admin_ip (your current admin workstation IP) in
+          group_vars/all.yml before applying the restrictive ruleset, or you risk
+          locking yourself out with only the serial console to recover.
+
+    - name: Snapshot config.xml
+      ansible.builtin.fetch:
+        src: /conf/config.xml
+        dest: "snapshots/config_pre_scaffold_{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}.xml"
+        flat: true
+      tags: snapshot
+
+    - name: Admin port alias (GUI + SSH)
+      pfsense_alias:
+        name: ADMIN_PORTS
+        type: port
+        address: "{{ ports.pfsense_gui }} {{ ports.ssh }}"
+        descr: "firewall GUI + SSH"
+        state: present
+
+    - name: "[SCAFFOLD] temporary admin allow to the firewall (top of MGMT)"
+      pfsense_rule:
+        name: "[ansible-managed][SCAFFOLD] temp admin to firewall"
+        interface: MGMT
+        action: pass
+        ipprotocol: inet
+        protocol: tcp
+        source: "{{ admin.scaffold_admin_ip }}"
+        destination: "(self)"
+        destination_port: ADMIN_PORTS
+        after: top
+        log: true
+        state: present

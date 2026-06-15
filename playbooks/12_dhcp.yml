@@ -1,0 +1,28 @@
+---
+# Phase 12 — DHCP for the OPERATOR VLAN (MGMT/SERVICES stay static)
+# Source of truth: group_vars/all.yml  (vlans.operator, dhcp.operator, decisions.dhcp)
+
+- name: DHCP pool for operator devices
+  hosts: pfsense
+  gather_facts: false
+  collections: [pfsensible.core]
+
+  tasks:
+    - name: Snapshot config.xml
+      ansible.builtin.fetch:
+        src: /conf/config.xml
+        dest: "snapshots/config_pre_dhcp_{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}.xml"
+        flat: true
+      tags: snapshot
+
+    - name: Operator DHCP pool
+      pfsense_dhcp_server:
+        interface: OPERATOR
+        enable: true
+        range_from: "{{ dhcp.operator.from }}"
+        range_to: "{{ dhcp.operator.to }}"
+        gateway: "{{ vlans.operator.gw }}"
+        # DNS intentionally omitted -> clients use the firewall's interface IP as resolver,
+        # keeping DNS on-box (no external resolver leak).
+        state: present
+      when: "'operator' in (decisions.dhcp | string)"

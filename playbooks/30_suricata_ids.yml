@@ -1,0 +1,30 @@
+---
+# Phase 30 — Suricata IDS (passive; optional)
+# Source of truth: group_vars/all.yml  (suricata_iface, suricata_ruleset)
+#
+# Runs Suricata in IDS (alert-only) mode on the WAN interface with the ET Open
+# ruleset and EVE JSON output. Promotion to inline IPS is a deliberate later step
+# (see docs/runbook.md) after a false-positive tuning window.
+
+- name: Suricata IDS (passive)
+  hosts: pfsense
+  gather_facts: false
+
+  tasks:
+    - name: Install the Suricata package
+      ansible.builtin.raw: pkg install -y pfSense-pkg-suricata
+      register: pkg
+      changed_when: "'Installing' in pkg.stdout"
+
+    - name: "[VERIFY] enable Suricata on the WAN interface (IDS mode, EVE JSON)"
+      ansible.builtin.debug:
+        msg: >
+          Enable Suricata on {{ suricata_iface }} in {{ suricata_ruleset }} mode via the
+          GUI or rewrite_config (package schema varies by version): IDS/alert-only,
+          EVE JSON enabled so Phase 40 can ship logs off-box.
+
+    # Pull fresh rules (cron this weekly once stable).
+    - name: Update rules
+      ansible.builtin.raw: suricata-update
+      changed_when: true
+      tags: [never, rules]

@@ -1,0 +1,75 @@
+---
+# Phase 60 — LOCKDOWN  (run LAST, only after the bastion chain is proven)
+# Source of truth: group_vars/all.yml  (admin.*, decisions.anti_lockout)
+#
+# This is the irreversible-feeling step. It:
+#   1. Removes the Phase 18 scaffold admin rule (your workstation loses direct admin)
+#   2. Disables the firewall's anti-lockout rule so the bastion is TRULY the sole admin
+#      source (otherwise the whole MGMT subnet could still reach the GUI)
+#
+# PRECONDITIONS — verify ALL before running (Phase 99 covers them):
+#   • bastion reaches the firewall 443/22   • operator -> bastion SSH works
+#   • the admin WireGuard break-glass tunnel works   • a serial console is available
+#
+# SAFETY: this play arms an AUTO-REVERT timer (commit-confirm style). It restores the
+# pre-lockdown config and reloads in {{ revert_minutes }} min UNLESS you cancel it after
+# confirming you still have admin access:
+#     ssh pfsense 'rm -f /tmp/pf_autorevert.flag'   (or run --tags cancel_revert)
+
+- name: Lockdown (remove scaffold, enforce bastion-only admin)
+  hosts: pfsense
+  gather_facts: false
+  collections: [pfsensible.core]
+
+  vars:
+    revert_minutes: 5
+
+  tasks:
+    - name: Snapshot config.xml (pre-lockdown = the revert target)
+      ansible.builtin.fetch:
+        src: /conf/config.xml
+        dest: "snapshots/config_pre_lockdown_{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}.xml"
+        flat: true
+      tags: snapshot
+
+    - name: Arm auto-revert (restores prior config in {{ revert_minutes }} min unless cancelled)
+      ansible.builtin.raw: |
+        cp /conf/config.xml /tmp/config_prelock.xml
+        touch /tmp/pf_autorevert.flag
+        nohup sh -c 'sleep {{ revert_minutes | int * 60 }};
+          if [ -f /tmp/pf_autorevert.flag ]; then
+            cp /tmp/config_prelock.xml /conf/config.xml && /etc/rc.reload_all;
+          fi' >/dev/null 2>&1 &
+      changed_when: true
+      tags: arm_revert
+
+    - name: Remove the scaffold admin rule
+      pfsense_rule:
+        name: "[ansible-managed][SCAFFOLD] temp admin to firewall"
+        interface: MGMT
+        state: absent
+
+    - name: "[VERIFY] disable the web GUI anti-lockout rule (enforce bastion-only)"
+      ansible.builtin.debug:
+        msg: >
+          Disable the webConfigurator anti-lockout rule (System > Advanced > Admin Access;
+          the exact label/config key varies by release) so only the bastion can reach the
+          GUI. Confirm the setting actually applied before cancelling the auto-revert.
+      when: admin.disable_anti_lockout | bool
+      tags: [anti_lockout, verify]
+
+    - name: >-
+        REMINDER — verify admin access NOW (bastion -> firewall, and WG break-glass),
+        then cancel auto-revert
+      ansible.builtin.debug:
+        msg: >
+          Lockdown applied. CONFIRM you can still reach the firewall via the bastion and the
+          WG break-glass tunnel. If yes, cancel the revert:
+          ssh pfsense 'rm -f /tmp/pf_autorevert.flag'. If you do nothing, the config
+          auto-reverts in {{ revert_minutes }} minutes.
+
+    # ansible-playbook playbooks/60_lockdown.yml --tags cancel_revert
+    - name: Cancel auto-revert (run after confirming access)
+      ansible.builtin.raw: rm -f /tmp/pf_autorevert.flag && echo "auto-revert cancelled"
+      changed_when: true
+      tags: [never, cancel_revert]

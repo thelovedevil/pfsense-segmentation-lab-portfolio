@@ -1,0 +1,19 @@
+# {{ ansible_managed }} — VLAN legs + bridges for the VNET jails
+# Parent trunk NIC tagged {{ freebsd.bridges.values() | map(attribute='vlan') | join(',') }}
+cloned_interfaces="{% for b, d in freebsd.bridges.items() %}vlan{{ d.vlan }} {% endfor %}{% for b in freebsd.bridges.keys() %}{{ b }} {% endfor %}"
+{% for b, d in freebsd.bridges.items() %}
+create_args_vlan{{ d.vlan }}="vlan {{ d.vlan }} vlandev {{ freebsd.trunk_if }}"
+{% endfor %}
+
+ifconfig_{{ freebsd.trunk_if }}="up"
+{% for b, d in freebsd.bridges.items() %}
+ifconfig_vlan{{ d.vlan }}="up"
+{% endfor %}
+{% for b, d in freebsd.bridges.items() %}
+ifconfig_{{ b }}="{% if d.host_ip %}inet {{ d.host_ip }} {% endif %}addm vlan{{ d.vlan }} up"
+{% endfor %}
+
+defaultrouter="{{ freebsd.defaultrouter }}"   # host's own default; VNET jails carry their own routes
+gateway_enable="NO"                            # the host is NOT a router
+jail_enable="YES"
+jail_parallel_start="YES"
