@@ -111,14 +111,21 @@ The result is asserted in phase 99: no operator/services rule routes `any` via W
 > the relevant phase flags them as **verify-on-target** and the runbook insists on a live
 > drop-the-tunnel test rather than trusting the config alone.
 
-## 6. FreeBSD VNET jails
+## 6. FreeBSD VNET jails (BastilleBSD)
 
 The services tier lives on a separate FreeBSD host that trunks VLAN 10 + 30 to the
-switch. Each jail gets its own network stack (`vnet`) via an `epair` bridged onto its
-VLAN, with its own default route to the firewall gateway for that VLAN. The host is **not**
-a router (`gateway_enable=NO`); jails route through the firewall like any other host, so
-the same segmentation rules apply to them. The store jail runs Samba with SMB3 sealing,
-bound to its VLAN address and allowed only from the operator subnet.
+switch. Jails are managed by **BastilleBSD** with ZFS backing — the modern, actively
+maintained jail manager for FreeBSD. Each jail is created in bridge mode (`bastille create
+-B`) with its own VNET network stack bridged onto the appropriate VLAN, and a dedicated
+default route to the firewall gateway for that VLAN. The host is **not** a router
+(`gateway_enable=NO`); jails route through the firewall like any other host, so the same
+segmentation rules apply to them. The store jail runs Samba with SMB3 sealing, bound to
+its VLAN address and allowed only from the operator subnet.
+
+**Implementation note:** VLAN interfaces and bridges are configured via `sysrc` directly
+into `/etc/rc.conf` rather than `rc.conf.d` fragments, because FreeBSD does not source
+`cloned_interfaces` from `rc.conf.d`. Jail package operations use `jexec` rather than
+`bastille cmd` for reliability.
 
 ## 7. The manual edges (honestly noted)
 

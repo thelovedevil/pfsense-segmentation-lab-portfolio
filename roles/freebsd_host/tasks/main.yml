@@ -1,34 +1,109 @@
 ---
-# FreeBSD host — VLAN legs, VNET jails, Samba on the store jail.
+# FreeBSD host — VLAN legs, BastilleBSD VNET jails, Samba on the store jail.
 # Target: inventory group 'freebsd' (the FreeBSD HOST — a different machine from the firewall).
-# VNET networking has version-specific nuances — verify each jail comes up with the
-# expected address + default route before relying on it.
 
 - name: Ensure python3 present
-  ansible.builtin.raw: pkg install -y python3
+  ansible.builtin.raw: pkg install -y python3 || true
   changed_when: false
 
-- name: Render segmentation network config (VLAN legs + bridges)
-  ansible.builtin.template:
-    src: rc.conf.segmentation.j2
-    dest: /etc/rc.conf.d/segmentation
-    mode: "0644"
-  notify: reload network
+# ── VLAN legs + bridges for VNET ──
 
-- name: Host is NOT a router; jails enabled at boot
+- name: Set cloned interfaces (VLANs + bridges) in rc.conf
   community.general.sysrc:
-    name: "{{ item.name }}"
-    value: "{{ item.value }}"
-  loop:
-    - { name: gateway_enable, value: "NO" }
-    - { name: jail_enable, value: "YES" }
-    - { name: jail_parallel_start, value: "YES" }
+    name: cloned_interfaces
+    value: "{% for b, d in freebsd.bridges.items() %}vlan{{ d.vlan }} {{ b }} {% endfor %}"
 
-- name: Render jail.conf (VNET jails)
-  ansible.builtin.template:
-    src: jail.conf.j2
-    dest: /etc/jail.conf
-    mode: "0644"
+- name: Set VLAN create args
+  community.general.sysrc:
+    name: "create_args_vlan{{ item.value.vlan }}"
+    value: "vlan {{ item.value.vlan }} vlandev {{ freebsd.trunk_if }}"
+  loop: "{{ freebsd.bridges | dict2items }}"
+
+- name: Set VLAN interface configs
+  community.general.sysrc:
+    name: "ifconfig_vlan{{ item.value.vlan }}"
+    value: "up"
+  loop: "{{ freebsd.bridges | dict2items }}"
+
+- name: Set bridge interface configs
+  community.general.sysrc:
+    name: "ifconfig_{{ item.key }}"
+    value: "{% if item.value.host_ip %}inet {{ item.value.host_ip }} {% endif %}addm vlan{{ item.value.vlan }} up"
+  loop: "{{ freebsd.bridges | dict2items }}"
+
+- name: Host is NOT a router
+  community.general.sysrc:
+    name: gateway_enable
+    value: "NO"
+
+- name: Check if bridges exist
+  ansible.builtin.command: ifconfig {{ item.key }}
+  loop: "{{ freebsd.bridges | dict2items }}"
+  register: bridge_check
+  changed_when: false
+  failed_when: false
+
+- name: Bring up VLAN interfaces and bridges
+  ansible.builtin.shell: |
+    service netif cloneup
+    {% for b, d in freebsd.bridges.items() %}
+    ifconfig vlan{{ d.vlan }} create vlan {{ d.vlan }} vlandev {{ freebsd.trunk_if }} up 2>/dev/null || true
+    ifconfig {{ b }} create up 2>/dev/null || true
+    ifconfig {{ b }} addm vlan{{ d.vlan }} {% if d.host_ip %}inet {{ d.host_ip }}{% endif %} up
+    {% endfor %}
+  when: bridge_check.results | selectattr('rc', 'ne', 0) | list | length > 0
+
+# ── BastilleBSD VNET jails ──
+
+- name: Install BastilleBSD
+  community.general.pkgng:
+    name: bastille
+    state: present
+
+- name: Enable Bastille at boot
+  community.general.sysrc:
+    name: bastille_enable
+    value: "YES"
+
+- name: Configure Bastille to use ZFS
+  ansible.builtin.lineinfile:
+    path: /usr/local/etc/bastille/bastille.conf
+    regexp: "{{ item.re }}"
+    line: "{{ item.line }}"
+  loop:
+    - { re: '^bastille_zfs_enable=', line: 'bastille_zfs_enable="YES"' }
+    - { re: '^bastille_zfs_zpool=', line: 'bastille_zfs_zpool="{{ freebsd_zfs_pool }}"' }
+
+- name: Bootstrap Bastille release ({{ freebsd_bastille_release }})
+  ansible.builtin.command:
+    cmd: bastille bootstrap {{ freebsd_bastille_release }} update
+  register: bastille_bootstrap
+  changed_when: "'already bootstrapped' not in bastille_bootstrap.stderr"
+  failed_when: bastille_bootstrap.rc != 0 and 'already bootstrapped' not in bastille_bootstrap.stderr
+
+- name: Create VNET jails
+  ansible.builtin.command:
+    cmd: >-
+      bastille create -B
+      -g {{ item.value.gw }}
+      {{ item.key }}
+      {{ freebsd_bastille_release }}
+      {{ item.value.ip }}
+      {{ item.value.bridge }}
+  loop: "{{ freebsd.jails | dict2items }}"
+  register: jail_create
+  changed_when: "'already exists' not in jail_create.stderr"
+  failed_when: jail_create.rc != 0 and 'already exists' not in jail_create.stderr
+
+- name: Start jails
+  ansible.builtin.command:
+    cmd: bastille start {{ item.key }}
+  loop: "{{ freebsd.jails | dict2items }}"
+  register: jail_start
+  changed_when: "'already running' not in jail_start.stderr"
+  failed_when: jail_start.rc != 0 and 'already running' not in jail_start.stderr
+
+# ── Host hardening ──
 
 - name: Host SSH hardening (key-only)
   ansible.builtin.lineinfile:
@@ -53,18 +128,34 @@
     - { name: net.inet.ip.random_id, value: "1" }
   notify: reload sysctl
 
-# ── Samba inside the store jail — host writes into the jail's filesystem ──
+# ── Samba inside the store jail ──
+
+- name: Set IGNORE_OSVERSION in jail pkg configs
+  ansible.builtin.shell: jexec {{ item.key }} sh -c 'mkdir -p /usr/local/etc && echo "IGNORE_OSVERSION=yes" > /usr/local/etc/pkg.conf'
+  loop: "{{ freebsd.jails | dict2items }}"
+  changed_when: false
+  tags: samba
+
+- name: Create Samba share directory in store jail
+  ansible.builtin.shell: jexec store sh -c 'mkdir -p /storage/media && chmod 0770 /storage/media'
+  changed_when: false
+  tags: samba
+
+- name: Install Samba in store jail
+  ansible.builtin.shell: jexec store sh -c 'ASSUME_ALWAYS_YES=yes IGNORE_OSVERSION=yes pkg install -y samba419'
+  register: samba_install
+  changed_when: "'already installed' not in samba_install.stdout"
+  failed_when: samba_install.rc != 0 and 'already installed' not in samba_install.stdout
+  tags: samba
+
 - name: Render the store jail's smb4.conf
   ansible.builtin.template:
     src: smb4.conf.j2
-    dest: /jails/store/usr/local/etc/smb4.conf
+    dest: /usr/local/bastille/jails/store/root/usr/local/etc/smb4.conf
     mode: "0644"
   tags: samba
 
-- name: Install + enable Samba in the store jail (verify pkg name per release)
-  ansible.builtin.raw: |
-    jexec store sh -c 'pkg install -y samba419 2>/dev/null || pkg install -y samba416' &&
-    jexec store sysrc samba_server_enable=YES &&
-    jexec store service samba_server restart
+- name: Enable + start Samba in store jail
+  ansible.builtin.shell: jexec store sh -c 'sysrc samba_server_enable=YES && service samba_server restart'
   changed_when: true
   tags: samba

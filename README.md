@@ -86,7 +86,7 @@ admin/lockout model, and the kill-switch design rationale.
 |---|---|
 | Config management | Ansible, `pfsensible.core` (pfSense CE config over SSH), `community.general` |
 | Firewall | pfSense CE — VLANs, rules, outbound NAT, gateways, Suricata IDS |
-| Host virtualization | FreeBSD VNET jails, bridged VLAN legs, Samba (SMB3) |
+| Host virtualization | FreeBSD VNET jails (BastilleBSD + ZFS), bridged VLAN legs, Samba (SMB3) |
 | Secrets | `ansible-vault`, gitignored vault files, dedicated SSH keypair |
 | Egress | Commercial WireGuard VPN with monitored-gateway kill-switch |
 
@@ -134,8 +134,8 @@ ansible-playbook site.yml --check --diff
 
 Infrastructure-as-Code · idempotent configuration management · network segmentation &
 least-privilege firewall design · threat modeling · safe-change methodology
-(dry-run, snapshot, commit-confirm rollback) · FreeBSD jails/networking · secrets
-hygiene · pfSense / WireGuard / Suricata.
+(dry-run, snapshot, commit-confirm rollback) · FreeBSD jails/networking (BastilleBSD, ZFS) ·
+secrets hygiene · pfSense / WireGuard / Suricata.
 
 ## What I'd do next
 

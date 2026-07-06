@@ -3,7 +3,8 @@
    workgroup = {{ samba.workgroup }}
    server string = store jail file share
    server min protocol = {{ samba.min_protocol }}
-   smb encrypt = {{ samba.encrypt }}          ; SMB3 sealing — in-transit encryption mandatory
+   ; SMB3 sealing — in-transit encryption mandatory
+   smb encrypt = {{ samba.encrypt }}
    bind interfaces only = yes
    interfaces = {{ samba.interface }}
    hosts allow = {{ samba.hosts_allow }} 127.
