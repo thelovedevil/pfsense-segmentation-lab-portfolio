@@ -51,6 +51,41 @@
         descr: "firewall GUI + SSH"
         state: present
 
+    # ── IPv6 DNS leak prevention (floating rules, evaluated before interface rules) ──
+    #    pfSense's default ruleset allows IPv6 DNS out WAN even when Unbound is configured
+    #    for IPv4-only forwarding via VPN. These floating block rules close that gap.
+    - name: "FLOATING — block IPv6 DNS (port 53) out WAN"
+      pfsense_rule:
+        name: "[ansible-managed] Block IPv6 DNS out WAN (leak prevention)"
+        interface: wan
+        action: block
+        ipprotocol: inet6
+        protocol: tcp/udp
+        source: any
+        destination: any
+        destination_port: "{{ ports.dns }}"
+        direction: out
+        floating: yes
+        quick: yes
+        log: true
+        state: present
+
+    - name: "FLOATING — block IPv6 DoT (port 853) out WAN"
+      pfsense_rule:
+        name: "[ansible-managed] Block IPv6 DoT out WAN (leak prevention)"
+        interface: wan
+        action: block
+        ipprotocol: inet6
+        protocol: tcp
+        source: any
+        destination: any
+        destination_port: 853
+        direction: out
+        floating: yes
+        quick: yes
+        log: true
+        state: present
+
     # ── WAN — anti-spoof (block private + bogon) is ON by default on pfSense.
     #    We deliberately do NOT reconfigure the WAN interface here: pfsense_interface
     #    requires full iface params (incl. descr) and risks the DHCP/WAN config. Confirm

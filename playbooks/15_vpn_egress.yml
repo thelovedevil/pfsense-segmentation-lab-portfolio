@@ -39,11 +39,83 @@
         mtu: 1420                                                # WireGuard overhead; avoids drops
         state: present
 
-    - name: Monitored gateway on the VPN tunnel (drives the kill-switch)
+    # Gateway — ICMP monitoring disabled because many VPN providers' server-side NAT
+    # rewrites ICMP echo-reply destinations, so dpinger never sees responses.
+    # Kill-switch still works via skip_rules_gw_down + gw_down_kill_states (Phase 25).
+    - name: VPN gateway (monitoring disabled — provider NAT breaks dpinger)
       pfsense_gateway:
         name: "{{ gateways.vpn_gw }}"
         interface: VPNEGRESS
         gateway: "{{ vpn.gateway_ip }}"     # far-side tunnel IP (e.g. 10.2.0.1); not "dynamic"
         nonlocalgateway: true               # it sits outside the /32 interface subnet
-        monitor: "{{ vpn.monitor_ip }}"     # gateway marked down when this stops responding
+        monitor_disable: "{{ vpn.monitor_disable }}"
         state: present
+
+    # DNS hardening — automated via phpshell (pfsensible has no unbound module).
+    # Prevents ISP DHCP from injecting DNS + forces Unbound to forward via VPN.
+    - name: "DNS — pin servers to VPN, disable DHCP override, enable forwarding"
+      pfsense_phpshell:
+        cmd: |
+          $changed = false;
+
+          // Remove dnsallowoverride (absence = disabled; blocks ISP DHCP DNS injection)
+          if (isset($config['system']['dnsallowoverride'])) {
+            unset($config['system']['dnsallowoverride']);
+            $changed = true;
+          }
+
+          // Set DNS servers pinned to VPN gateway
+          $want_servers = array(
+          {% for s in dns.servers %}
+            '{{ s.ip }}',
+          {% endfor %}
+          );
+          $current = isset($config['system']['dnsserver']) ? $config['system']['dnsserver'] : array();
+          if ($current != $want_servers) {
+            $config['system']['dnsserver'] = $want_servers;
+            $changed = true;
+          }
+
+          // Pin each DNS server to the VPN gateway
+          {% for s in dns.servers %}
+          if (!isset($config['system']['dns{{ loop.index }}gw']) || $config['system']['dns{{ loop.index }}gw'] != '{{ s.gateway }}') {
+            $config['system']['dns{{ loop.index }}gw'] = '{{ s.gateway }}';
+            $changed = true;
+          }
+          {% endfor %}
+
+          if ($changed) {
+            write_config("ansible: DNS servers pinned to VPN, DHCP override disabled");
+            system_resolvconf_generate(true);
+          }
+
+    - name: "DNS — Unbound forwarding mode + outgoing interface + disable IPv6"
+      pfsense_phpshell:
+        cmd: |
+          $changed = false;
+
+          // Enable forwarding mode (Unbound forwards to configured servers, not root-resolver)
+          if (!isset($config['unbound']['forwarding'])) {
+            $config['unbound']['forwarding'] = '';
+            $changed = true;
+          }
+
+          // Set outgoing interface to VPN tunnel
+          if (!isset($config['unbound']['outgoing_interface']) || $config['unbound']['outgoing_interface'] != '{{ dns.outgoing_interface }}') {
+            $config['unbound']['outgoing_interface'] = '{{ dns.outgoing_interface }}';
+            $changed = true;
+          }
+
+          // Disable IPv6 DNS via custom_options
+          {% if not dns.do_ipv6 %}
+          $want = 'do-ip6: no';
+          if (!isset($config['unbound']['custom_options']) || $config['unbound']['custom_options'] != $want) {
+            $config['unbound']['custom_options'] = $want;
+            $changed = true;
+          }
+          {% endif %}
+
+          if ($changed) {
+            write_config("ansible: Unbound forwarding via VPN, IPv6 disabled");
+            services_unbound_configure(true);
+          }

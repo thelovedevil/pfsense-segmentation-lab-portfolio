@@ -56,3 +56,32 @@ admin connection regardless of source NAT or subnet (it's the segmentation rule,
 Flip Outbound NAT to **Manual in the GUI** (it *copies* the existing auto rules → no connectivity
 loss). Then delete the **operator/services → WAN** copies so those tiers translate **only** onto the
 VPN interface — that absence of a WAN translation path is the leak-proofing.
+
+### 5. DNS leaks silently even with a working VPN tunnel
+A working WireGuard tunnel does NOT mean DNS is safe. Three independent leak vectors:
+- **ISP DHCP injection:** most ISPs push their DNS servers via DHCP. pfSense accepts them by
+  default (`dnsallowoverride` present = enabled). Your resolv.conf fills with ISP entries, and
+  every lookup leaks your queries to the ISP in plaintext.
+  **Fix:** remove `<dnsallowoverride>` from config.xml. Add explicit DNS servers (e.g. Quad9)
+  with their gateway set to the VPN gateway.
+- **Unbound root-resolver mode:** out of the box, Unbound does iterative root resolution — DNS
+  queries go directly to root/TLD servers via whatever route the OS picks (usually WAN). Even
+  with DNS servers configured, Unbound ignores them unless **forwarding mode** is enabled.
+  **Fix:** set `<forwarding/>` in the Unbound config, and set the outgoing interface to the
+  VPN tunnel interface.
+- **IPv6 DNS:** pfSense's default ruleset allows all IPv6 out from the firewall host. This lets
+  Unbound send IPv6 DNS out WAN even when IPv4 DNS is tunneled.
+  **Fix:** add floating block rules for inet6 port 53 (DNS) and 853 (DoT) out WAN, and set
+  `do-ip6: no` in Unbound custom options.
+- Phase 15 automates all three fixes via `pfsense_phpshell`.
+
+### 6. VPN provider NAT can break ICMP gateway monitoring (dpinger)
+Some VPN providers' server-side NAT rewrites ICMP echo-reply destinations: you send from the tunnel
+IP, the reply comes back, but the provider delivers it with a different destination address. dpinger
+never sees the response → gateway shows 100% loss / "down" permanently.
+- **Fix:** set `monitor_disable: true` on the VPN gateway. The kill-switch still works because
+  `skip_rules_gw_down` + `gw_down_kill_states` operate on the WireGuard interface state (link
+  down / handshake timeout), not on dpinger status alone.
+- **Also:** do NOT use the same monitor IP for both WAN and VPN gateways.
+  `setup_gateways_monitor()` creates conflicting host routes — whichever route wins, the other
+  gateway's dpinger gets the wrong path.

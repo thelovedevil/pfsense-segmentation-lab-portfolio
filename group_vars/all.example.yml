@@ -52,8 +52,18 @@ vpn:
   endpoint:          "{{ vault_vpn_endpoint  | default('') }}"   # host:port
   interface_address: "{{ vault_vpn_address   | default('') }}"   # e.g. 10.2.0.2/32
   gateway_ip:        "10.2.0.1"  # far-side tunnel IP (provider end); used with nonlocalgateway
-  monitor_ip:        "9.9.9.9"   # kill-switch down-detection (1.1.1.1 rate-limits ICMP from VPN exits)
-  full_tunnel:       true        # AllowedIPs 0.0.0.0/0
+  monitor_disable:   true         # many VPN providers' NAT breaks ICMP → dpinger never sees replies
+  full_tunnel:       true         # AllowedIPs 0.0.0.0/0
+
+# ── DNS hardening (prevents ISP DHCP DNS injection + IPv6 leak) ──
+dns:
+  servers:
+    - { ip: "9.9.9.9",         gateway: VPN_GW }   # Quad9 primary — pinned to VPN
+    - { ip: "149.112.112.112", gateway: VPN_GW }   # Quad9 secondary — pinned to VPN
+  allow_override: false     # block ISP DHCP from injecting DNS servers
+  forwarding: true          # Unbound forwards to above servers (not root-resolver mode)
+  outgoing_interface: tun_wg0   # Unbound sources queries from VPN tunnel IP
+  do_ipv6: false            # disable IPv6 DNS resolution in Unbound
 
 # ── Admin plane & lockout safety ──
 admin:
