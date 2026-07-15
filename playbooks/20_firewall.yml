@@ -91,6 +91,23 @@
     #    requires full iface params (incl. descr) and risks the DHCP/WAN config. Confirm
     #    the two checkboxes in the GUI (Interfaces > WAN) if unsure.
 
+    # ── LAN (legacy flat subnet) — policy-route through VPN ──────────────────────
+    # The default LAN allow rule ships with no gateway (= WAN default route).
+    # This replaces it with a VPN-routed rule so LAN clients exit through the VPN,
+    # matching OPERATOR/SERVICES behavior. Without this, LAN clients leak to the ISP.
+    - name: "LAN 1 — internet egress via VPN"
+      pfsense_rule:
+        name: "LAN to any via VPN"
+        interface: lan
+        action: pass
+        ipprotocol: inet
+        protocol: any
+        source: "{{ admin.legacy_lan_subnet }}"
+        destination: any
+        gateway: "{{ gateways.vpn_gw }}"
+        state: present
+      when: admin.legacy_lan_subnet | default('') | length > 0
+
     # ── MGMT — admin plane; bastion is the sole source to the firewall ───────────
     - name: "MGMT 1 — bastion is the SOLE source to the firewall GUI/SSH"
       pfsense_rule:
